@@ -176,6 +176,8 @@ members = [
     "integration-tests",
     "common/nym-kkt-ciphersuite",
     "common/nym-kkt-context",
+    "nym-network-monitor-v3/nym-network-monitor-orchestrator",
+    "nym-network-monitor-v3/nym-network-monitor-agent",
 ]
 
 default-members = [
@@ -186,6 +188,7 @@ default-members = [
     "nym-credential-proxy/nym-credential-proxy",
     "nym-node",
     "nym-node-status-api/nym-node-status-agent",
+    "nym-network-monitor-v3/nym-network-monitor-agent",
     "nym-statistics-api",
     "nym-validator-rewarder",
     "nyx-chain-watcher",
