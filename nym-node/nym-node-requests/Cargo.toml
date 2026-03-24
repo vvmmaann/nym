@@ -56,3 +56,6 @@ nym-crypto = { workspace = true, features = ["rand"] }
 default = ["client"]
 client = ["nym-http-api-client", "async-trait"]
 openapi = ["utoipa", "nym-bin-common/openapi", "nym-exit-policy/openapi"]
+
+[lints]
+workspace = true
