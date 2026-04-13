@@ -5217,6 +5217,7 @@ version = "1.20.4"
 dependencies = [
  "anyhow",
  "clap",
+ "nym-bin-common",
  "nym-lp",
  "nym-lp-data",
  "serde",
