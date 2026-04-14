@@ -1,5 +1,5 @@
 use crate::db::DbConnection;
-use crate::db::models::{TestRunDto, TestRunStatus};
+use crate::db::models::{TestRunDto, TestRunKind, TestRunStatus};
 use crate::db::queries;
 use crate::utils::{now_utc, unix_timestamp_to_utc_rfc3339};
 use crate::{
@@ -16,7 +16,8 @@ use axum::{
     extract::{Path, State},
 };
 use nym_node_status_client::models::{
-    TestrunAssignmentWithTickets, get_testrun, submit_results, submit_results_v2,
+    TestrunAssignmentWithTickets, get_testrun, submit_ports_check_results_v2, submit_results,
+    submit_results_v2,
 };
 use reqwest::StatusCode;
 use tracing::error;
@@ -26,7 +27,15 @@ use tracing::error;
 pub(crate) fn routes() -> Router<AppState> {
     Router::new()
         .route("/", axum::routing::get(request_testrun))
+        .route(
+            "/ports-check",
+            axum::routing::get(request_ports_check_testrun),
+        )
         .route("/:testrun_id", axum::routing::post(submit_testrun))
+        .route(
+            "/:testrun_id/ports-check/v2",
+            axum::routing::post(submit_ports_check_testrun_v2),
+        )
         .route("/:testrun_id/v2", axum::routing::post(submit_testrun_v2))
         .layer(DefaultBodyLimit::max(1024 * 1024 * 5))
 }
@@ -84,6 +93,65 @@ async fn request_testrun(
                         "could not retrieve needed tickets: {err}"
                     ))
                 })?;
+            Ok(Json(assignment.with_ticket_materials(materials)))
+        }
+        Err(err) => Err(HttpError::internal_with_logging(err)),
+    }
+}
+
+#[tracing::instrument(level = "debug", skip_all)]
+async fn request_ports_check_testrun(
+    State(state): State<AppState>,
+    Json(request): Json<get_testrun::GetTestrunRequest>,
+) -> HttpResult<Json<TestrunAssignmentWithTickets>> {
+    state.authenticate_agent_submission(&request)?;
+    state.is_fresh(&request.payload.timestamp)?;
+
+    tracing::debug!("Agent requested ports-check testrun");
+
+    let db = state.db_pool();
+    let mut conn = db
+        .acquire()
+        .await
+        .map_err(HttpError::internal_with_logging)?;
+
+    let active_testruns = db::queries::testruns::count_testruns_in_progress(&mut conn)
+        .await
+        .map_err(HttpError::internal_with_logging)?
+        .unwrap_or_default();
+    let max_count = state.agent_max_count();
+    if active_testruns >= max_count {
+        tracing::warn!("{active_testruns}/{max_count} testruns in progress, rejecting",);
+        return Err(HttpError::no_testruns_available());
+    }
+
+    match db::queries::testruns::assign_oldest_ports_check_testrun(&mut conn).await {
+        Ok(res) => {
+            let Some(assignment) = res else {
+                tracing::debug!("No ports-check testruns available");
+                return Err(HttpError::no_testruns_available());
+            };
+
+            tracing::info!(
+                "🏃‍ Assigned ports-check testrun row_id {} gateway {} to agent",
+                &assignment.testrun_id,
+                assignment.gateway_identity_key,
+            );
+
+            let materials = state
+                .ticketbook_manager_state()
+                .attempt_assign_ticket_materials(assignment.testrun_id)
+                .await
+                .map_err(|err| {
+                    error!(
+                        "failed to get ticket materials for ports-check runner {}: {err}",
+                        assignment.testrun_id
+                    );
+                    HttpError::internal_with_logging(format!(
+                        "could not retrieve needed tickets: {err}"
+                    ))
+                })?;
+
             Ok(Json(assignment.with_ticket_materials(materials)))
         }
         Err(err) => Err(HttpError::internal_with_logging(err)),
@@ -264,6 +332,84 @@ async fn submit_testrun_v2(
             process_testrun_submission_by_gateway(gateway_id, submission.payload, &mut conn).await
         }
     }
+}
+
+#[tracing::instrument(level = "debug", skip_all)]
+async fn submit_ports_check_testrun_v2(
+    Path(submitted_testrun_id): Path<i32>,
+    State(state): State<AppState>,
+    Json(submission): Json<submit_ports_check_results_v2::SubmitPortsCheckResultsV2>,
+) -> HttpResult<StatusCode> {
+    state.authenticate_agent_submission(&submission)?;
+
+    let db = state.db_pool();
+    let mut conn = db
+        .acquire()
+        .await
+        .map_err(HttpError::internal_with_logging)?;
+
+    let testrun = queries::testruns::get_in_progress_testrun_by_id(&mut conn, submitted_testrun_id)
+        .await
+        .map_err(|err| {
+            tracing::warn!(
+                "No testruns in progress for ports-check testrun_id {}: {}",
+                submitted_testrun_id,
+                err
+            );
+            HttpError::invalid_input(format!(
+                "Testrun {submitted_testrun_id} not found in progress state (may be already completed or expired)"
+            ))
+        })?;
+
+    if testrun.kind != TestRunKind::PortsCheck as i16 {
+        return Err(HttpError::invalid_input(format!(
+            "Testrun {submitted_testrun_id} is not a ports-check testrun"
+        )));
+    }
+
+    if Some(submission.payload.assigned_at_utc) != testrun.last_assigned_utc {
+        return Err(HttpError::invalid_input(format!(
+            "Testrun {} timestamp mismatch: expected {:?}, got {}",
+            submitted_testrun_id, testrun.last_assigned_utc, submission.payload.assigned_at_utc
+        )));
+    }
+
+    let gw_identity = queries::select_gateway_identity(&mut conn, testrun.gateway_id)
+        .await
+        .map_err(HttpError::internal_with_logging)?;
+
+    if gw_identity != submission.payload.gateway_identity_key {
+        return Err(HttpError::invalid_input("Gateway identity mismatch"));
+    }
+
+    // Mark testrun complete before updating gateway state (mirrors submit_testrun)
+    queries::testruns::update_testrun_status(
+        &mut conn,
+        submitted_testrun_id,
+        TestRunStatus::Complete,
+    )
+    .await
+    .map_err(HttpError::internal_with_logging)?;
+
+    // Merge ports_check into last_probe_result JSON and update timestamps
+    queries::testruns::persist_ports_check_result(
+        &mut conn,
+        testrun.gateway_id,
+        &submission.payload.port_check_result,
+    )
+    .await
+    .map_err(HttpError::internal_with_logging)?;
+
+    // Store the log alongside the existing probe log field (best-effort overwrite)
+    queries::testruns::update_gateway_last_probe_log(
+        &mut conn,
+        testrun.gateway_id,
+        &submission.payload.probe_log,
+    )
+    .await
+    .map_err(HttpError::internal_with_logging)?;
+
+    Ok(StatusCode::CREATED)
 }
 
 async fn process_testrun_submission(

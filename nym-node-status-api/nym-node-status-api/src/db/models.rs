@@ -292,6 +292,7 @@ pub struct TestRunDto {
     pub id: i32,
     pub gateway_id: i32,
     pub status: i32,
+    pub kind: i16,
     pub created_utc: i64,
     pub ip_address: String,
     pub log: String,
@@ -304,6 +305,13 @@ pub(crate) enum TestRunStatus {
     Complete = 2,
     InProgress = 1,
     Queued = 0,
+}
+
+#[derive(Debug, Clone, Copy, strum_macros::Display, EnumString, FromRepr, PartialEq, Eq)]
+#[repr(i16)]
+pub(crate) enum TestRunKind {
+    Probe = 0,
+    PortsCheck = 1,
 }
 
 #[derive(Debug, Clone)]

@@ -1,6 +1,6 @@
 use nym_connection_monitor::ConnectionStatusEvent;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 pub use super::bandwidth_helpers::{AttachedTicket, AttachedTicketMaterials};
 pub use super::socks5_test::HttpsConnectivityResult;
@@ -207,8 +207,8 @@ pub struct PortCheckResult {
     pub gateway: String,
     pub can_register: bool,
     pub port_check_target: String,
-    /// port → open/closed
-    pub ports: HashMap<String, bool>,
+    /// port → open/closed (BTreeMap for deterministic bincode serialization in signed requests)
+    pub ports: BTreeMap<String, bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
