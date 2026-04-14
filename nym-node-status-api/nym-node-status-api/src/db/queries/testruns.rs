@@ -266,6 +266,8 @@ pub(crate) async fn persist_ports_check_result(
     let ports_check_value = serde_json::json!({
         "all_pass": all_pass,
         "failed_ports": failed_ports,
+        "error": port_check_result.error,
+        "ports_tested": port_check_result.ports.len(),
     });
 
     let mut existing: serde_json::Value =
