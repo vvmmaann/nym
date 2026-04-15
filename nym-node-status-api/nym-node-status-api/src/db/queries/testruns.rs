@@ -194,7 +194,7 @@ pub(crate) async fn update_gateway_last_probe_log(
     .map_err(From::from)
 }
 
-pub(crate) async fn update_gateway_last_probe_result(
+async fn set_gateway_last_probe_result(
     conn: &mut DbConnection,
     gateway_pk: i32,
     result: &str,
@@ -208,6 +208,31 @@ pub(crate) async fn update_gateway_last_probe_result(
     .await
     .map(drop)
     .map_err(From::from)
+}
+
+pub(crate) async fn update_gateway_last_probe_result(
+    conn: &mut DbConnection,
+    gateway_pk: i32,
+    new_result: &str,
+) -> anyhow::Result<()> {
+    let existing_ports_check = match get_gateway_last_probe_result(conn, gateway_pk).await? {
+        Some(s) => serde_json::from_str::<serde_json::Value>(&s)
+            .ok()
+            .and_then(|v| v.get("ports_check").cloned()),
+        None => None,
+    };
+
+    let result = if let Some(pc) = existing_ports_check {
+        let mut new_val: serde_json::Value = serde_json::from_str(new_result)?;
+        if let Some(obj) = new_val.as_object_mut() {
+            obj.insert("ports_check".to_string(), pc);
+        }
+        serde_json::to_string(&new_val)?
+    } else {
+        new_result.to_string()
+    };
+
+    set_gateway_last_probe_result(conn, gateway_pk, &result).await
 }
 
 pub(crate) async fn update_gateway_last_ports_check_utc(
@@ -284,7 +309,7 @@ pub(crate) async fn persist_ports_check_result(
     }
 
     let merged = serde_json::to_string(&existing)?;
-    update_gateway_last_probe_result(conn, gateway_pk, &merged).await?;
+    set_gateway_last_probe_result(conn, gateway_pk, &merged).await?;
     update_gateway_last_ports_check_utc(conn, gateway_pk, now).await?;
     Ok(())
 }
